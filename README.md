@@ -37,7 +37,7 @@ The server provides MCP tools to perform the following actions on a connected Fo
 
 *   Python 3.11 (as specified in `.python-version`)
 *   Access to a FortiGate device.
-*   The FortiGate device must be configured to allow API access for the token you will use.
+*   The FortiGate device must be configured to allow API access for the admin user you will use.
 *   Required Python packages (see `requirements.txt`).
 
 ## Setup and Installation
@@ -68,7 +68,8 @@ The server provides MCP tools to perform the following actions on a connected Fo
     # .env file for mcp-forti
 
     FORTIGATE_HOST=your_fortigate_ip_or_hostname
-    FORTIGATE_API_TOKEN=your_fortigate_api_access_token
+    FORTIGATE_USERNAME=your_fortigate_admin_username
+    FORTIGATE_PASSWORD=your_fortigate_admin_password
 
     # Optional: Specify VDOM (defaults to 'root' if not set)
     # FORTIGATE_VDOM=your_target_vdom
@@ -84,7 +85,7 @@ The server provides MCP tools to perform the following actions on a connected Fo
     # FORTIGATE_SSL_VERIFY=True
     ```
 
-    **Note on API Token:** Ensure the API token has the necessary permissions on the FortiGate/VDOM to perform the actions exposed by this server (e.g., read/write for policies, system, router, etc.).
+    **Note on Admin User:** Ensure the administrator account (`FORTIGATE_USERNAME`) has the necessary permissions on the FortiGate/VDOM to perform the actions exposed by this server (e.g., read/write for policies, system, router, etc.). Also, ensure the IP address of the machine running `mcp-forti` is listed in the "Trusted Hosts" for this admin user on the FortiGate if that security feature is enabled.
 
 ## Running the Server
 
@@ -114,15 +115,14 @@ The server exposes the following tools. Refer to the docstrings within `main.py`
 *   `create_fortigate_service_group`: Creates a new firewall service group.
 *   `get_fortigate_service_group`: Retrieves firewall service groups.
 
-*(You may want to list all tools from `main.py` here, potentially with brief descriptions if the names aren't self-explanatory enough, though your current names are quite clear).*
-
 ## Important Considerations
 
 *   **Traffic Log Mocking:** As stated, `get_fortigate_traffic_logs` returns sample data. For live log retrieval, the `tools/traffic_logs.py` module will need to be updated with actual FortiGate API calls for log fetching.
-*   **Communication Protocol:** The FortiGate client is configured by default to use HTTP. If you switch to HTTPS (by setting `FORTIGATE_SCHEME=https`), ensure your FortiGate is configured for HTTPS API access and consider setting `FORTIGATE_SSL_VERIFY=True` if you have a trusted certificate.
+*   **Communication Protocol:** The FortiGate client is configured by default to use HTTP (via `FORTIGATE_SCHEME` defaulting to `http`). If you switch to HTTPS, ensure your FortiGate is configured for HTTPS API access and consider setting `FORTIGATE_SSL_VERIFY=True` if you have a trusted certificate.
 *   **Error Handling:** The tools generally return a JSON response. On error, this JSON typically includes an `"error"` key with a descriptive message and sometimes a `"details"` key with more specific information from the API.
-*   **Security:** The API token stored in the `.env` file is sensitive. Ensure this file is not committed to your Git repository (it should be in your `.gitignore` file).
+*   **Security:** Credentials (`FORTIGATE_USERNAME`, `FORTIGATE_PASSWORD`) stored in the `.env` file are sensitive. Ensure this file is **not** committed to your Git repository (it should be in your `.gitignore` file).
 
 ## Development Notes (for `tools/` modules)
 
-The modules within `tools/` (especially `service_objects.py`) sometimes use dynamic path resolution to interact with the `fortigate-api` client library (e.g., `fgt_client.cmdb.firewall_service.custom.get()`). This approach can be sensitive to changes in the underlying `fortigate-api` library structure across different versions. If issues arise after updating `fortigate-api`, these paths might need to be re-verified against the library's documentation.
+The modules within `tools/` (especially `service_objects.py`) sometimes use dynamic path resolution (e.g., `_resolve_fgt_api_path` helper) to interact with the `fortigate-api` client library. This approach can be sensitive to changes in the underlying `fortigate-api` library structure across different versions. If issues arise after updating `fortigate-api`, these paths might need to be re-verified against the library's documentation.
+
