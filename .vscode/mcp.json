@@ -1,9 +1,0 @@
-{
-    "servers": {
-      "fortigate-mcp": {
-        "type": "stdio",
-        "command": "uv",
-        "args": ["run", "--with", "mcp", "mcp", "run", "/home/badr/Desktop/mcp_server_fortigate/mcp-forti/main.py"]
-      }
-    }
-  }
