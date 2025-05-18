@@ -1,4 +1,4 @@
-# mcp_fortigate_server/tools/__init__.py
+# mcp-forti/tools/__init__.py
 
 # This file makes the 'tools' directory a Python package.
 # You can import tool functions here if you want to make them directly accessible
@@ -16,8 +16,8 @@ from .interfaces import get_interfaces_details, create_interface
 from .static_routes import get_static_routes, create_static_route
 from .address_objects import create_address_object, get_address_object
 from .service_objects import (
-    create_service_object, 
-    get_service_object, 
+    create_service_object,
+    get_service_object,
     create_service_group,
     get_service_group
 )
@@ -27,7 +27,7 @@ __all__ = [
     # Client
     "get_fortigate_client",
     "FortiGateClientError",
-    "FORTIGATE_VDOM",
+    "FORTIGATE_VDOM", # Still useful for context in other modules
     # Traffic Logs
     "get_traffic_logs",
     # Policies

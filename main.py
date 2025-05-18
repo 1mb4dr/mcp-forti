@@ -11,6 +11,8 @@ from tools import (
     get_traffic_logs,
     get_policy_details,
     create_policy,
+    delete_policy,
+    get_all_policies,
     get_interfaces_details,
     create_interface,
     get_static_routes,
@@ -121,6 +123,48 @@ async def create_fortigate_firewall_policy(ctx: Context, policy_config: Dict[str
         return result
     except Exception as e: # Catch any other unexpected errors
         logger.error(f"Unexpected error in MCP tool create_fortigate_firewall_policy: {e}", exc_info=True)
+        return {"error": f"An unexpected server error occurred: {str(e)}"}
+
+@app.tool()
+async def delete_fortigate_firewall_policy(ctx: Context, policy_id: int) -> Dict[str, Any]:
+    """
+    Deletes a specific firewall policy by its ID from FortiGate.
+    Provide the numeric ID (mkey) of the policy to delete.
+    """
+    logger.info(f"MCP Tool: delete_fortigate_firewall_policy called for policy_id: {policy_id}")
+    if not fgt_client_global:
+        logger.error("FortiGate client is not available for delete_fortigate_firewall_policy.")
+        return {"error": "FortiGate client is not available."}
+    try:
+        # The delete_policy function from tools/policies.py should handle the actual API call
+        result = delete_policy(fgt_client_global, policy_id=policy_id)
+        return result
+    except FortiGateClientError as e: # Catch client-specific errors if they propagate
+        logger.error(f"FortiGate client error in MCP tool delete_fortigate_firewall_policy for policy {policy_id}: {e}")
+        return {"error": f"FortiGate client error: {e}"}
+    except Exception as e:
+        logger.error(f"Unexpected error in MCP tool delete_fortigate_firewall_policy for policy {policy_id}: {e}", exc_info=True)
+        return {"error": f"An unexpected server error occurred: {str(e)}"}
+
+@app.tool()
+async def get_all_fortigate_firewall_policies(ctx: Context) -> Dict[str, Any]:
+    """
+    Retrieves all firewall policies from the FortiGate.
+    """
+    logger.info("MCP Tool: get_all_fortigate_firewall_policies called.")
+    if not fgt_client_global:
+        logger.error("FortiGate client is not available for get_all_fortigate_firewall_policies.")
+        return {"error": "FortiGate client is not available."}
+    try:
+        policies_list = get_all_policies(fgt_client_global)
+        if isinstance(policies_list, dict) and "error" in policies_list: # If get_all_policies itself returned an error dict
+            return policies_list
+        return {"policies": policies_list} # Wrap the list in a dictionary for a consistent MCP tool return
+    except FortiGateClientError as e:
+        logger.error(f"FortiGate client error in MCP tool get_all_fortigate_firewall_policies: {e}")
+        return {"error": f"FortiGate client error: {e}"}
+    except Exception as e:
+        logger.error(f"Unexpected error in MCP tool get_all_fortigate_firewall_policies: {e}", exc_info=True)
         return {"error": f"An unexpected server error occurred: {str(e)}"}
 
 @app.tool()
