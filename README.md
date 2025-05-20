@@ -44,7 +44,7 @@ The server provides MCP tools to perform the following actions on a connected Fo
 
 1.  **Clone the repository:**
     ```bash
-    git clone <your-repository-url>
+    git clone <the-repository-url>
     cd mcp-forti
     ```
 
