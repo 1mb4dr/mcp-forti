@@ -182,6 +182,75 @@ def create_policy(fgt_client, policy_config: dict):
             error_details = _parse_api_error_details(e.response)
         return {"error": f"API exception during policy '{policy_name}' creation.", "details": error_details}
 
+def update_policy(fgt_client, policy_id: int, policy_config: dict):
+    """
+    Updates an existing firewall policy by its ID.
+    """
+    logger.info(f"Attempting to update policy ID: {policy_id} in VDOM: {FORTIGATE_VDOM}")
+    logger.debug(f"Update payload for policy ID {policy_id}: {policy_config}")
+
+    if not policy_id: # policy_id is int, so check for 0 or None if that's possible. Assuming 0 is invalid.
+        msg = "Policy ID not provided for update."
+        logger.error(msg)
+        return {"error": msg}
+
+    try:
+        # The fortigate-api library uses 'set' for updates (HTTP PUT) on CMDB items.
+        api_response = fgt_client.cmdb.firewall.policy.set(mkey=policy_id, data=policy_config)
+        
+        status_code = getattr(api_response, 'status_code', None)
+        response_data = api_response
+        if hasattr(api_response, 'json'):
+            try:
+                response_data = api_response.json()
+            except ValueError: # If response is not JSON
+                response_data = getattr(api_response, 'text', str(api_response))
+        
+        logger.debug(f"API response for policy update ID {policy_id}: HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
+
+        if status_code and 200 <= status_code < 300:
+            if isinstance(response_data, dict) and response_data.get("status") == "error":
+                error_detail = _parse_api_error_details(response_data)
+                logger.error(f"FortiGate API error on update for policy ID {policy_id} (HTTP {status_code}): {error_detail}")
+                return {"error": f"FortiGate API error for policy ID {policy_id} update", "details": response_data}
+            
+            logger.info(f"Successfully updated policy ID {policy_id} (HTTP {status_code}).")
+            return {"status": "success", "message": f"Policy ID {policy_id} updated successfully.", "details": response_data}
+        elif status_code: # Error HTTP status code
+            error_detail = _parse_api_error_details(response_data)
+            # Specific check for "not found" type errors from HTTP status
+            if status_code == 404 or "not found" in error_detail.lower() or "entry not found" in error_detail.lower():
+                logger.warning(f"Policy ID {policy_id} not found for update (HTTP {status_code}). Error: {error_detail}")
+                return {"error": f"Policy ID {policy_id} not found (API error).", "details": error_detail}
+            logger.error(f"FortiGate API error (HTTP {status_code}) updating policy ID {policy_id}: {error_detail}")
+            return {"error": f"FortiGate API error (HTTP {status_code}) for policy ID {policy_id} update", "details": response_data}
+        elif isinstance(api_response, dict): # Fallback for direct dict responses
+            if api_response.get("status") == "success":
+                 logger.info(f"Policy ID {policy_id} update successful (dict response).")
+                 return {"status": "success", "message": f"Policy ID {policy_id} updated successfully.", "details": api_response}
+            else:
+                 error_detail = _parse_api_error_details(api_response)
+                 if "entry not found" in error_detail.lower() or "-404" in error_detail: # Check for error codes if present
+                    logger.warning(f"Policy ID {policy_id} not found for update (dict response). Error: {error_detail}")
+                    return {"error": f"Policy ID {policy_id} not found (API error).", "details": error_detail}
+                 logger.error(f"Policy ID {policy_id} update failed (dict response): {error_detail}")
+                 return {"error": f"Policy update failed for ID {policy_id} (dict response)", "details": api_response}
+        else:
+            logger.error(f"Policy update for ID {policy_id} returned an unexpected response type: {type(api_response)}, {api_response}")
+            return {"error": "Unexpected response type from API library during update.", "details": str(api_response)}
+
+    except Exception as e:
+        logger.error(f"API exception updating policy ID {policy_id}: {e}", exc_info=True)
+        error_details = str(e)
+        if hasattr(e, 'response'):
+            error_details = _parse_api_error_details(e.response)
+        
+        # Specific check for "entry not found" or similar for updates on non-existent items
+        if "entry not found" in error_details.lower() or "404" in error_details or "not found" in error_details.lower():
+             logger.warning(f"Attempted to update non-existent policy ID {policy_id}. Error: {error_details}")
+             return {"error": f"Policy ID {policy_id} not found for update.", "details": error_details}
+        return {"error": f"API exception during policy ID {policy_id} update.", "details": error_details}
+
 if __name__ == '__main__':
     # Import get_fortigate_client locally for testing this module
     from fortigate_client import get_fortigate_client, FortiGateClientError
@@ -240,7 +309,72 @@ if __name__ == '__main__':
             #         # del_response = delete_policy(client, new_policy_id) # Be careful with this!
             #         # logger.info(f"Deletion response for policy {new_policy_id}: {del_response}")
             #         pass # Placeholder for delete call
+            
+            print(f"\n--- Testing Update Policy ID {policy_id_to_get} ---")
+            logger.warning(f"The update policy test will use policy ID '{policy_id_to_get}'. Ensure this policy ID exists and is suitable for non-disruptive testing (e.g., changing comments and status).")
 
+            logger.info(f"Fetching initial details for policy ID {policy_id_to_get} before update...")
+            initial_policy_details_response = get_policy_details(client, policy_id=policy_id_to_get)
+
+            if isinstance(initial_policy_details_response, dict) and "error" in initial_policy_details_response:
+                logger.error(f"Cannot proceed with update test for policy ID {policy_id_to_get}: Error fetching initial details: {initial_policy_details_response['error']}")
+            elif not isinstance(initial_policy_details_response, dict) or "results" not in initial_policy_details_response or not initial_policy_details_response["results"]:
+                logger.error(f"Cannot proceed with update test for policy ID {policy_id_to_get}: No results found or unexpected format for initial details: {initial_policy_details_response}")
+            else:
+                initial_policy_details = initial_policy_details_response["results"][0] # Assuming result is a list with one item
+                original_comments = initial_policy_details.get("comments", "")
+                original_status = initial_policy_details.get("status")
+                logger.info(f"Original comments for policy ID {policy_id_to_get}: '{original_comments}'")
+                logger.info(f"Original status for policy ID {policy_id_to_get}: '{original_status}'")
+
+                if original_status is None: # Status is a mandatory field usually, but good to check
+                    logger.error(f"Original status for policy ID {policy_id_to_get} could not be determined. Skipping update test.")
+                else:
+                    update_policy_config = {
+                        "comments": "Updated by MCP Tool Python test - Integration Test",
+                        "status": "disable"
+                    }
+                    logger.info(f"Attempting to update policy ID {policy_id_to_get} with: Comments='{update_policy_config['comments']}', Status='{update_policy_config['status']}'")
+                    update_response = update_policy(client, policy_id_to_get, update_policy_config)
+
+                    if isinstance(update_response, dict) and "error" in update_response:
+                        logger.error(f"Error updating policy ID {policy_id_to_get}: {update_response.get('error')}, Details: {update_response.get('details')}")
+                    else:
+                        logger.info(f"Policy ID {policy_id_to_get} update API call response: {update_response}")
+                        logger.info(f"Verifying update for policy ID {policy_id_to_get}...")
+                        updated_details_response = get_policy_details(client, policy_id=policy_id_to_get)
+                        if isinstance(updated_details_response, dict) and "results" in updated_details_response and updated_details_response["results"]:
+                            updated_details = updated_details_response["results"][0]
+                            current_comments = updated_details.get("comments", "")
+                            current_status = updated_details.get("status")
+                            if current_comments == update_policy_config["comments"] and current_status == update_policy_config["status"]:
+                                logger.info(f"SUCCESS: Policy ID {policy_id_to_get} updated successfully. Comments: '{current_comments}', Status: '{current_status}'.")
+                            else:
+                                logger.error(f"FAILURE: Policy ID {policy_id_to_get} verification failed. Expected: Comments='{update_policy_config['comments']}', Status='{update_policy_config['status']}'. Got: Comments='{current_comments}', Status='{current_status}'.")
+                        else:
+                            logger.error(f"Could not verify update for policy ID {policy_id_to_get}'. Error fetching details post-update: {updated_details_response}")
+
+                        # Revert Change
+                        revert_policy_config = {"comments": original_comments, "status": original_status}
+                        logger.info(f"Attempting to revert policy ID {policy_id_to_get} to: Comments='{original_comments}', Status='{original_status}'")
+                        revert_response = update_policy(client, policy_id_to_get, revert_policy_config)
+
+                        if isinstance(revert_response, dict) and "error" in revert_response:
+                            logger.error(f"Error reverting policy ID {policy_id_to_get}: {revert_response.get('error')}, Details: {revert_response.get('details')}")
+                        else:
+                            logger.info(f"Policy ID {policy_id_to_get} revert API call response: {revert_response}")
+                            logger.info(f"Verifying revert for policy ID {policy_id_to_get}'...")
+                            reverted_details_response = get_policy_details(client, policy_id=policy_id_to_get)
+                            if isinstance(reverted_details_response, dict) and "results" in reverted_details_response and reverted_details_response["results"]:
+                                reverted_details = reverted_details_response["results"][0]
+                                final_comments = reverted_details.get("comments", "")
+                                final_status = reverted_details.get("status")
+                                if final_comments == original_comments and final_status == original_status:
+                                    logger.info(f"SUCCESS: Policy ID {policy_id_to_get} successfully reverted. Comments: '{final_comments}', Status: '{final_status}'.")
+                                else:
+                                    logger.error(f"FAILURE: Policy ID {policy_id_to_get} revert verification failed. Expected: Comments='{original_comments}', Status='{original_status}'. Got: Comments='{final_comments}', Status='{final_status}'.")
+                            else:
+                                logger.error(f"Could not verify revert for policy ID {policy_id_to_get}'. Error fetching details post-revert: {reverted_details_response}")
         else:
             logger.error("Could not get FortiGate client for testing policies.")
     except FortiGateClientError as e:
