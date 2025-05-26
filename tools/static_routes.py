@@ -2,18 +2,7 @@
 
 import logging
 from .fortigate_client import FortiGateClientError, FORTIGATE_VDOM
-# Re-using the helper from policies or define locally if preferred
-def _parse_api_error_details(response_obj_or_text):
-    """Helper to extract error details from various response types."""
-    if hasattr(response_obj_or_text, 'text'): # requests.Response like
-        try:
-            data = response_obj_or_text.json()
-            return data.get("cli_error", data.get("message", str(data)))
-        except ValueError:
-            return response_obj_or_text.text
-    elif isinstance(response_obj_or_text, dict):
-        return response_obj_or_text.get("cli_error", response_obj_or_text.get("message", str(response_obj_or_text)))
-    return str(response_obj_or_text)
+from .utils import _parse_api_error_details, handle_api_response
 
 logger = logging.getLogger(__name__)
 
@@ -64,49 +53,25 @@ def create_static_route(fgt_client, route_config: dict):
 
     try:
         api_response = fgt_client.cmdb.router.static.create(data=route_config)
-        
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-            except ValueError:
-                response_data = getattr(api_response, 'text', str(api_response))
-        
-        logger.debug(f"API response for static route dst '{route_dst_for_log}': HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
+        response_dict = handle_api_response(api_response, f"static route creation for dst '{route_dst_for_log}'", FORTIGATE_VDOM, logger)
 
-        if status_code and 200 <= status_code < 300:
-            if isinstance(response_data, dict) and response_data.get("status") == "error":
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error for static route dst '{route_dst_for_log}' (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for dst '{route_dst_for_log}'", "details": response_data}
-
-            mkey = response_data.get("mkey", response_data.get("seq-num")) if isinstance(response_data, dict) else None
-            logger.info(f"Successfully created static route (HTTP {status_code}). Seq-num: {mkey if mkey else 'N/A'}. Dst: {route_dst_for_log}")
-            return {"status": "success", "message": "Static route created successfully.", "seq-num": mkey, "details": response_data}
-        elif status_code: # Error HTTP status code
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error (HTTP {status_code}) for static route dst '{route_dst_for_log}': {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code}) for dst '{route_dst_for_log}'", "details": response_data}
-        elif isinstance(api_response, dict): # Fallback for direct dict responses
-            if api_response.get("status") == "success":
-                 mkey = api_response.get("mkey", api_response.get("seq-num"))
-                 logger.info(f"Static route for dst '{route_dst_for_log}' creation successful (dict response). Seq-num: {mkey if mkey else 'N/A'}")
-                 return {"status": "success", "message": "Static route created successfully.", "seq-num": mkey, "details": api_response}
-            else:
-                 error_detail = _parse_api_error_details(api_response)
-                 logger.error(f"Static route for dst '{route_dst_for_log}' creation failed (dict response): {error_detail}")
-                 return {"error": f"Static route creation for dst '{route_dst_for_log}' failed (dict response)", "details": api_response}
-        else:
-            logger.error(f"Static route creation for dst '{route_dst_for_log}' returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library.", "details": str(api_response)}
+        if response_dict.get("status") == "success":
+            details = response_dict.get("details", {})
+            mkey = None
+            if isinstance(details, dict):
+                mkey = details.get("mkey", details.get("seq-num"))
+            elif isinstance(details, list) and details: # If details is a list of results
+                mkey = details[0].get("mkey", details[0].get("seq-num")) if isinstance(details[0], dict) else None
+            
+            response_dict["seq-num"] = mkey
+            logger.info(f"Successfully created static route. Seq-num: {mkey if mkey else 'N/A'}. Dst: {route_dst_for_log}")
+            response_dict["message"] = f"Static route for dst '{route_dst_for_log}' created successfully. Seq-num: {mkey if mkey else 'N/A'}."
+        return response_dict
 
     except Exception as e:
         logger.error(f"API exception creating static route for dst '{route_dst_for_log}': {e}", exc_info=True)
-        error_details = str(e)
-        if hasattr(e, 'response'):
-            error_details = _parse_api_error_details(e.response)
-        return {"error": f"API exception during static route creation for dst '{route_dst_for_log}'.", "details": error_details}
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
+        return {"error": f"API exception during static route creation for dst '{route_dst_for_log}'.", "details": error_details_str}
 
 if __name__ == '__main__':
     from fortigate_client import get_fortigate_client, FortiGateClientError

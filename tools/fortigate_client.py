@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 FORTIGATE_HOST = os.getenv("FORTIGATE_HOST")
-FORTIGATE_USERNAME = os.getenv("FORTIGATE_USERNAME") # Use Username
-FORTIGATE_PASSWORD = os.getenv("FORTIGATE_PASSWORD") # Use Password
+FORTIGATE_USERNAME = os.getenv("FORTIGATE_USERNAME")
+FORTIGATE_PASSWORD = os.getenv("FORTIGATE_PASSWORD")
 FORTIGATE_VDOM = os.getenv("FORTIGATE_VDOM", "root") # Default to 'root' VDOM
 FORTIGATE_SSL_VERIFY_STR = os.getenv("FORTIGATE_SSL_VERIFY", "False").lower()
 FORTIGATE_SSL_VERIFY = FORTIGATE_SSL_VERIFY_STR == "true"

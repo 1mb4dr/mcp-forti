@@ -1,23 +1,8 @@
 # mcp_fortigate_server/tools/interfaces.py
 
 import logging
-from .fortigate_client import FortiGateClientError, FORTIGATE_VDOM # FORTIGATE_VDOM used in logging
-# Re-using the helper from policies or define locally if preferred
-# from .policies import _parse_api_error_details
-# For now, let's define it locally to keep modules more independent or assume a common utils later
-def _parse_api_error_details(response_obj_or_text):
-    """Helper to extract error details from various response types."""
-    if hasattr(response_obj_or_text, 'text'): # requests.Response like
-        try:
-            data = response_obj_or_text.json()
-            # FortiOS often has 'cli_error' or 'error' (numeric code) or 'message'
-            return data.get("cli_error", data.get("message", str(data)))
-        except ValueError:
-            return response_obj_or_text.text
-    elif isinstance(response_obj_or_text, dict):
-        return response_obj_or_text.get("cli_error", response_obj_or_text.get("message", str(response_obj_or_text)))
-    return str(response_obj_or_text)
-
+from .fortigate_client import FortiGateClientError, FORTIGATE_VDOM
+from .utils import _parse_api_error_details, handle_api_response
 
 logger = logging.getLogger(__name__)
 
@@ -76,47 +61,11 @@ def create_interface(fgt_client, interface_config: dict):
 
     try:
         api_response = fgt_client.cmdb.system.interface.create(data=interface_config)
-        
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-            except ValueError:
-                response_data = getattr(api_response, 'text', str(api_response))
-        
-        logger.debug(f"API response for interface '{interface_name_for_log}': HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
-
-        if status_code and 200 <= status_code < 300:
-            if isinstance(response_data, dict) and response_data.get("status") == "error": # FortiOS specific error in payload
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error for interface '{interface_name_for_log}' (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for '{interface_name_for_log}'", "details": response_data}
-            
-            logger.info(f"Successfully created interface '{interface_name_for_log}' (HTTP {status_code}).")
-            return {"status": "success", "message": f"Interface '{interface_name_for_log}' created successfully.", "details": response_data}
-        elif status_code: # Error HTTP status code
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error (HTTP {status_code}) for interface '{interface_name_for_log}': {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code}) for '{interface_name_for_log}'", "details": response_data}
-        elif isinstance(api_response, dict): # Fallback for direct dict responses
-            if api_response.get("status") == "success":
-                 logger.info(f"Interface '{interface_name_for_log}' creation successful (dict response).")
-                 return {"status": "success", "message": f"Interface '{interface_name_for_log}' created successfully.", "details": api_response}
-            else:
-                 error_detail = _parse_api_error_details(api_response)
-                 logger.error(f"Interface '{interface_name_for_log}' creation failed (dict response): {error_detail}")
-                 return {"error": f"Interface creation failed for '{interface_name_for_log}' (dict response)", "details": api_response}
-        else:
-            logger.error(f"Interface creation for '{interface_name_for_log}' returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library.", "details": str(api_response)}
-
+        return handle_api_response(api_response, f"interface creation for '{interface_name_for_log}'", FORTIGATE_VDOM, logger)
     except Exception as e:
         logger.error(f"API exception creating interface '{interface_name_for_log}': {e}", exc_info=True)
-        error_details = str(e)
-        if hasattr(e, 'response'):
-            error_details = _parse_api_error_details(e.response)
-        return {"error": f"API exception during interface '{interface_name_for_log}' creation.", "details": error_details}
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
+        return {"error": f"API exception during interface '{interface_name_for_log}' creation.", "details": error_details_str}
 
 def update_interface(fgt_client, interface_name: str, interface_config: dict):
     """
@@ -135,52 +84,15 @@ def update_interface(fgt_client, interface_name: str, interface_config: dict):
         # Assuming 'set' is the correct method based on common FortiOS API patterns for CMDB.
         # If 'update' is the method, fgt_client.cmdb.system.interface.update(mkey=interface_name, data=interface_config)
         api_response = fgt_client.cmdb.system.interface.set(mkey=interface_name, data=interface_config)
-        
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-            except ValueError: # If response is not JSON
-                response_data = getattr(api_response, 'text', str(api_response))
-        
-        logger.debug(f"API response for interface update '{interface_name}': HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
-
-        if status_code and 200 <= status_code < 300:
-            # Check for FortiOS specific error in payload even with 2xx status
-            if isinstance(response_data, dict) and response_data.get("status") == "error":
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error on update for interface '{interface_name}' (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for '{interface_name}' update", "details": response_data}
-            
-            logger.info(f"Successfully updated interface '{interface_name}' (HTTP {status_code}).")
-            return {"status": "success", "message": f"Interface '{interface_name}' updated successfully.", "details": response_data}
-        elif status_code: # Error HTTP status code
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error (HTTP {status_code}) updating interface '{interface_name}': {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code}) for '{interface_name}' update", "details": response_data}
-        elif isinstance(api_response, dict): # Fallback for direct dict responses (e.g. from some SDK versions or direct calls)
-            if api_response.get("status") == "success": # Check for FortiOS success status in dict
-                 logger.info(f"Interface '{interface_name}' update successful (dict response).")
-                 return {"status": "success", "message": f"Interface '{interface_name}' updated successfully.", "details": api_response}
-            else: # Assume error if not explicitly success
-                 error_detail = _parse_api_error_details(api_response)
-                 logger.error(f"Interface '{interface_name}' update failed (dict response): {error_detail}")
-                 return {"error": f"Interface update failed for '{interface_name}' (dict response)", "details": api_response}
-        else: # Unexpected response type
-            logger.error(f"Interface update for '{interface_name}' returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library during update.", "details": str(api_response)}
-
+        return handle_api_response(api_response, f"interface update for '{interface_name}'", FORTIGATE_VDOM, logger)
     except Exception as e:
         logger.error(f"API exception updating interface '{interface_name}': {e}", exc_info=True)
-        error_details = str(e)
-        if hasattr(e, 'response'): # If the exception is from requests library, it might have a response attribute
-            error_details = _parse_api_error_details(e.response)
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
         # Specific check for "entry not found" or similar for updates on non-existent items
-        if "entry not found" in error_details.lower() or "404" in error_details:
-             logger.warning(f"Attempted to update non-existent interface '{interface_name}'. Error: {error_details}")
-             return {"error": f"Interface '{interface_name}' not found for update.", "details": error_details}
-        return {"error": f"API exception during interface '{interface_name}' update.", "details": error_details}
+        if "entry not found" in error_details_str.lower() or "404" in error_details_str: # Check the parsed/stringified error
+             logger.warning(f"Attempted to update non-existent interface '{interface_name}'. Error: {error_details_str}")
+             return {"error": f"Interface '{interface_name}' not found for update.", "details": error_details_str}
+        return {"error": f"API exception during interface '{interface_name}' update.", "details": error_details_str}
 
 if __name__ == '__main__':
     from fortigate_client import get_fortigate_client, FortiGateClientError
@@ -246,11 +158,11 @@ if __name__ == '__main__':
 
             if isinstance(initial_interface_details, dict) and "error" in initial_interface_details:
                 logger.error(f"Cannot proceed with update test for '{test_interface_name}': Error fetching initial details: {initial_interface_details['error']}")
-            elif not isinstance(initial_interface_details, dict) or "results" not in initial_interface_details or not initial_interface_details["results"]:
-                logger.error(f"Cannot proceed with update test for '{test_interface_name}': No results found or unexpected format for initial details: {initial_interface_details}")
+            # get_interfaces_details for a specific interface should return the interface dict directly or an error dict
+            elif not isinstance(initial_interface_details, dict) or initial_interface_details.get('name') != test_interface_name : # Or some other key that must be present
+                logger.error(f"Cannot proceed with update test for '{test_interface_name}': Expected a dict with interface details but got: {initial_interface_details}")
             else:
-                # Assuming the details are in the first element of the 'results' list if present
-                original_description = initial_interface_details["results"][0].get("description", "")
+                original_description = initial_interface_details.get("description", "")
                 logger.info(f"Original description for '{test_interface_name}': '{original_description}'")
 
                 update_config = {
@@ -265,14 +177,16 @@ if __name__ == '__main__':
                     logger.info(f"Interface '{test_interface_name}' update API call response: {update_response}")
                     logger.info(f"Verifying update for interface '{test_interface_name}'...")
                     updated_details = get_interfaces_details(client, interface_name=test_interface_name)
-                    if isinstance(updated_details, dict) and "results" in updated_details and updated_details["results"]:
-                        current_description = updated_details["results"][0].get("description", "")
+                    if isinstance(updated_details, dict) and updated_details.get('name') == test_interface_name:
+                        current_description = updated_details.get("description", "")
                         if current_description == update_config["description"]:
                             logger.info(f"SUCCESS: Interface '{test_interface_name}' description updated successfully to '{current_description}'.")
                         else:
                             logger.error(f"FAILURE: Interface '{test_interface_name}' description verification failed. Expected: '{update_config['description']}', Got: '{current_description}'.")
+                    elif isinstance(updated_details, dict) and "error" in updated_details:
+                        logger.error(f"Could not verify update for '{test_interface_name}'. Error fetching details post-update: {updated_details['error']}")
                     else:
-                        logger.error(f"Could not verify update for '{test_interface_name}'. Error fetching details post-update: {updated_details}")
+                        logger.error(f"Could not verify update for '{test_interface_name}'. Unexpected response: {updated_details}")
 
                     # Revert Change
                     revert_config = {"description": original_description}
@@ -285,14 +199,16 @@ if __name__ == '__main__':
                         logger.info(f"Interface '{test_interface_name}' revert API call response: {revert_response}")
                         logger.info(f"Verifying revert for interface '{test_interface_name}'...")
                         reverted_details = get_interfaces_details(client, interface_name=test_interface_name)
-                        if isinstance(reverted_details, dict) and "results" in reverted_details and reverted_details["results"]:
-                            final_description = reverted_details["results"][0].get("description", "")
+                    if isinstance(reverted_details, dict) and reverted_details.get('name') == test_interface_name:
+                        final_description = reverted_details.get("description", "")
                             if final_description == original_description:
                                 logger.info(f"SUCCESS: Interface '{test_interface_name}' description successfully reverted to '{final_description}'.")
                             else:
                                 logger.error(f"FAILURE: Interface '{test_interface_name}' description revert verification failed. Expected: '{original_description}', Got: '{final_description}'.")
+                    elif isinstance(reverted_details, dict) and "error" in reverted_details:
+                        logger.error(f"Could not verify revert for '{test_interface_name}'. Error fetching details post-revert: {reverted_details['error']}")
                         else:
-                            logger.error(f"Could not verify revert for '{test_interface_name}'. Error fetching details post-revert: {reverted_details}")
+                        logger.error(f"Could not verify revert for '{test_interface_name}'. Unexpected response: {reverted_details}")
         else:
             logger.error("Could not get FortiGate client for testing interfaces.")
     except FortiGateClientError as e:

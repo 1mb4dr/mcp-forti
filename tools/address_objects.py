@@ -2,18 +2,7 @@
 
 import logging
 from .fortigate_client import FortiGateClientError, FORTIGATE_VDOM
-
-def _parse_api_error_details(response_obj_or_text):
-    """Helper to extract error details from various response types."""
-    if hasattr(response_obj_or_text, 'text'): # requests.Response like
-        try:
-            data = response_obj_or_text.json()
-            return data.get("cli_error", data.get("message", str(data)))
-        except ValueError:
-            return response_obj_or_text.text
-    elif isinstance(response_obj_or_text, dict):
-        return response_obj_or_text.get("cli_error", response_obj_or_text.get("message", str(response_obj_or_text)))
-    return str(response_obj_or_text)
+from .utils import _parse_api_error_details, handle_api_response
 
 logger = logging.getLogger(__name__)
 
@@ -46,71 +35,30 @@ def create_address_object(fgt_client, object_config: dict):
 
     try:
         api_response = fgt_client.cmdb.firewall.address.create(data=object_config)
-        
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        text_content_for_check = ""
+        response_dict = handle_api_response(api_response, f"address object creation for '{obj_name}'", FORTIGATE_VDOM, logger)
 
-        if hasattr(api_response, 'text'):
-            text_content_for_check = api_response.text
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-                # If json parsing works, use it also for string checks if it's a dict
-                if isinstance(response_data, dict):
-                    text_content_for_check = str(response_data)
-            except ValueError:
-                # response_data remains api_response.text or str(api_response)
-                response_data = text_content_for_check if text_content_for_check else str(api_response)
-        
-        logger.debug(f"API response for '{obj_name}': HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
-
-        if status_code and 200 <= status_code < 300:
-            if isinstance(response_data, dict) and response_data.get("status") == "error":
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error for '{obj_name}' (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for '{obj_name}'", "details": response_data}
+        if response_dict.get("error"):
+            details = response_dict.get("details", {})
+            http_status = response_dict.get("http_status") # Now directly from handle_api_response
             
-            logger.info(f"Successfully sent create request for address object '{obj_name}'. HTTP Status: {status_code}.")
-            return {"status": "success", "message": f"Address object '{obj_name}' creation request sent.", "details": response_data}
-        
-        elif status_code == 500: # Specific handling for HTTP 500
-            str_response_lower = text_content_for_check.lower()
-            if "already exist" in str_response_lower or "duplicate entry" in str_response_lower or "-5: Object already_exists" in str_response_lower : # -5 is common for already exists
-                logger.warning(f"Address object '{obj_name}' might already exist. FortiGate returned HTTP 500. Details: {response_data}")
-                return {"status": "warning", "message": f"Address object '{obj_name}' might already exist (HTTP 500).", "details": response_data}
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error HTTP 500 during address object '{obj_name}' creation: {error_detail}")
-            return {"error": f"FortiGate API error (HTTP 500) for '{obj_name}'", "details": response_data}
-
-        elif status_code: # Other non-2xx, non-500 errors
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error (HTTP {status_code}) for address object '{obj_name}': {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code}) for '{obj_name}'", "details": response_data}
-        
-        elif isinstance(api_response, dict): # Fallback for direct dict responses
-            if api_response.get("status") == "success":
-                 logger.info(f"Address object '{obj_name}' creation successful (dict response).")
-                 return {"status": "success", "message": f"Address object '{obj_name}' created successfully.", "details": api_response}
-            else: # Includes cases like "status": "error" or http_status being non-200 in the dict
-                 error_detail = _parse_api_error_details(api_response)
-                 if "already exist" in error_detail.lower() or "duplicate entry" in error_detail.lower() or "-5: Object already_exists" in error_detail:
-                     logger.warning(f"Address object '{obj_name}' might already exist (parsed dict). Details: {api_response}")
-                     return {"status": "warning", "message": f"Address object '{obj_name}' might already exist (parsed dict).", "details": api_response}
-                 logger.error(f"Address object '{obj_name}' creation failed (dict response): {error_detail}")
-                 return {"error": f"Address object creation failed for '{obj_name}' (dict response)", "details": api_response}
-        else:
-            logger.error(f"Address object creation for '{obj_name}' returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library.", "details": str(api_response)}
+            error_text_check = str(details).lower()
+            # Check for HTTP 500 or specific FortiOS error codes like -5 for "already exists"
+            # The http_status from handle_api_response will be the actual HTTP status or a non-HTTP code like -1 from dict responses
+            if (http_status == 500 or (isinstance(details, dict) and details.get("error") == -5)) and \
+               ("already exist" in error_text_check or \
+                "duplicate entry" in error_text_check or \
+                "already_exists" in error_text_check or \
+                (isinstance(details, dict) and details.get("cli_error", "").startswith("Object already exists"))): # Check cli_error for specific message
+                logger.warning(f"Address object '{obj_name}' might already exist. API indicated an error but it's treated as a warning. Original error details: {details}")
+                return {"status": "warning", "message": f"Address object '{obj_name}' might already exist.", "details": details}
+        return response_dict
 
     except Exception as e:
         logger.error(f"API exception creating address object '{obj_name}': {e}", exc_info=True)
-        error_details_str = str(e)
-        if hasattr(e, 'response'):
-            error_details_str = _parse_api_error_details(e.response)
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
         
-        # Check for common CLI errors if available in the response text
-        if "Command fail" in error_details_str or "entry not found" in error_details_str.lower(): # "entry not found" might imply a referenced object is missing
+        # Retain specific "Command fail" check if useful, otherwise rely on parsed details
+        if "Command fail" in error_details_str:
              return {"error": f"FortiGate CLI error for '{obj_name}'. Check config or if it already exists.", "details": error_details_str}
         return {"error": f"An API exception occurred for '{obj_name}'.", "details": error_details_str}
 

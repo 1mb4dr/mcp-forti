@@ -1,5 +1,6 @@
 import logging
 import json # Keep for potential use, though direct dict passing is now preferred for config
+import functools # Add this import at the top with other imports
 from dotenv import load_dotenv
 from mcp.server.fastmcp  import FastMCP, Context # MCP SDK
 from typing import Optional, Dict, List, Any # For type hinting
@@ -32,6 +33,31 @@ logger = logging.getLogger("FortiGateMCPServer")
 # Load environment variables (e.g., for FORTIGATE_HOST, FORTIGATE_API_TOKEN)
 load_dotenv()
 
+def mcp_tool_wrapper(func):
+    """
+    A decorator for MCP tool functions that checks for FortiGate client availability
+    and handles generic exceptions.
+    """
+    @functools.wraps(func)
+    async def wrapper(ctx: Context, *args, **kwargs):
+        if not fgt_client_global:
+            logger.error(f"MCP Tool {func.__name__}: FortiGate client is not available.")
+            return {"error": "FortiGate client is not available."}
+        try:
+            # Log the actual function call with its specific arguments
+            # Constructing a meaningful log string for args/kwargs can be tricky
+            # For simplicity, we'll just log the function name here, 
+            # individual functions can log their specific important args.
+            logger.info(f"MCP Tool: {func.__name__} invoked.")
+            return await func(ctx, *args, **kwargs)
+        except FortiGateClientError as e: # Catch specific client errors first
+            logger.error(f"FortiGate client error in MCP tool {func.__name__}: {e}", exc_info=True)
+            return {"error": f"FortiGate client error: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Unexpected error in MCP tool {func.__name__}: {e}", exc_info=True)
+            return {"error": f"An unexpected server error occurred: {str(e)}"}
+    return wrapper
+
 # Initialize the MCP server application
 app = FastMCP("FortiGateManager")
 
@@ -50,6 +76,7 @@ except Exception as e:
 # --- MCP Tool Definitions ---
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_fortigate_traffic_logs(
     ctx: Context,
     log_filter: Optional[str] = None,
@@ -62,35 +89,27 @@ async def get_fortigate_traffic_logs(
     the maximum number of logs, and a time range (e.g., "1hour", "24hours").
     Note: Log filtering capabilities are dependent on the FortiGate API and this is a simplified interface.
     """
-    logger.info(f"MCP Tool: get_fortigate_traffic_logs called with filter='{log_filter}', max_logs={max_logs}, time_range='{time_range}'")
-    if not fgt_client_global:
-        return {"error": "FortiGate client is not available."}
-    try:
-        result = get_traffic_logs(fgt_client_global, log_filter=log_filter, max_logs=max_logs, time_range=time_range)
-        if isinstance(result, dict) and "error" in result:
-            logger.error(f"Error from get_traffic_logs: {result['error']}")
-        return {"logs": result} 
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_fortigate_traffic_logs: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+    # Original logging of parameters can be kept or adapted if needed
+    logger.info(f"Executing get_fortigate_traffic_logs with filter='{log_filter}', max_logs={max_logs}, time_range='{time_range}'")
+    result = get_traffic_logs(fgt_client_global, log_filter=log_filter, max_logs=max_logs, time_range=time_range)
+    if isinstance(result, dict) and "error" in result:
+        logger.error(f"Error from underlying get_traffic_logs tool: {result['error']}")
+        return result # Return the error dict directly
+    return {"logs": result}
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_fortigate_policy_details(ctx: Context, policy_id: int) -> Dict[str, Any]:
     """
     Retrieves detailed information for a specific firewall policy ID from FortiGate.
     Provide the numeric ID of the policy.
     """
-    logger.info(f"MCP Tool: get_fortigate_policy_details called for policy_id: {policy_id}")
-    if not fgt_client_global:
-        return {"error": "FortiGate client is not available."}
-    try:
-        result = get_policy_details(fgt_client_global, policy_id=policy_id)
-        return result 
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_fortigate_policy_details: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+    logger.info(f"Executing get_fortigate_policy_details for policy_id: {policy_id}") 
+    result = get_policy_details(fgt_client_global, policy_id=policy_id)
+    return result
 
 @app.tool()
+@mcp_tool_wrapper
 async def create_fortigate_firewall_policy(ctx: Context, policy_config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Creates a new firewall policy on the FortiGate.
@@ -126,69 +145,51 @@ async def create_fortigate_firewall_policy(ctx: Context, policy_config: Dict[str
         return {"error": f"An unexpected server error occurred: {str(e)}"}
 
 @app.tool()
+@mcp_tool_wrapper
 async def delete_fortigate_firewall_policy(ctx: Context, policy_id: int) -> Dict[str, Any]:
     """
     Deletes a specific firewall policy by its ID from FortiGate.
     Provide the numeric ID (mkey) of the policy to delete.
     """
-    logger.info(f"MCP Tool: delete_fortigate_firewall_policy called for policy_id: {policy_id}")
-    if not fgt_client_global:
-        logger.error("FortiGate client is not available for delete_fortigate_firewall_policy.")
-        return {"error": "FortiGate client is not available."}
-    try:
-        # The delete_policy function from tools/policies.py should handle the actual API call
-        result = delete_policy(fgt_client_global, policy_id=policy_id)
-        return result
-    except FortiGateClientError as e: # Catch client-specific errors if they propagate
-        logger.error(f"FortiGate client error in MCP tool delete_fortigate_firewall_policy for policy {policy_id}: {e}")
-        return {"error": f"FortiGate client error: {e}"}
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool delete_fortigate_firewall_policy for policy {policy_id}: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+    logger.info(f"Executing delete_fortigate_firewall_policy for policy_id: {policy_id}")
+    result = delete_policy(fgt_client_global, policy_id=policy_id)
+    return result
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_all_fortigate_firewall_policies(ctx: Context) -> Dict[str, Any]:
-    """
-    Retrieves all firewall policies from the FortiGate.
-    """
-    logger.info("MCP Tool: get_all_fortigate_firewall_policies called.")
-    if not fgt_client_global:
-        logger.error("FortiGate client is not available for get_all_fortigate_firewall_policies.")
-        return {"error": "FortiGate client is not available."}
-    try:
-        policies_list = get_all_policies(fgt_client_global)
-        if isinstance(policies_list, dict) and "error" in policies_list: # If get_all_policies itself returned an error dict
-            return policies_list
-        return {"policies": policies_list} # Wrap the list in a dictionary for a consistent MCP tool return
-    except FortiGateClientError as e:
-        logger.error(f"FortiGate client error in MCP tool get_all_fortigate_firewall_policies: {e}")
-        return {"error": f"FortiGate client error: {e}"}
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_all_fortigate_firewall_policies: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+    """Retrieves all firewall policies from the FortiGate."""
+    logger.info("Executing get_all_fortigate_firewall_policies.")
+    policies_list = get_all_policies(fgt_client_global)
+    if isinstance(policies_list, dict) and "error" in policies_list:
+        return policies_list
+    return {"policies": policies_list}
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_fortigate_interface_details(ctx: Context, interface_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Retrieves details for all network interfaces or a specific interface by name from FortiGate.
     If 'interface_name' is omitted, all interfaces are returned.
     """
-    logger.info(f"MCP Tool: get_fortigate_interface_details called for interface_name: {interface_name}")
-    if not fgt_client_global:
-        return {"error": "FortiGate client is not available."}
-    try:
-        result = get_interfaces_details(fgt_client_global, interface_name=interface_name)
-        if isinstance(result, dict) and "error" in result:
-            return result
-        elif isinstance(result, list):
-            return {"interfaces": result}
-        elif isinstance(result, dict): 
+    logger.info(f"Executing get_fortigate_interface_details for interface_name: {interface_name if interface_name else 'all interfaces'}.")
+    result = get_interfaces_details(fgt_client_global, interface_name=interface_name)
+
+    if isinstance(result, dict) and "error" in result:
+        return result 
+    
+    if interface_name is not None: # Single interface requested
+        if isinstance(result, dict): # Expected result for single
             return {"interface": result}
-        else: 
-            return {"error": "Unexpected data format from interface tool."}
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_fortigate_interface_details: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+        else: # Should ideally not happen if tool returns error dict for not found
+            logger.error(f"Unexpected result type for single interface fetch ('{interface_name}'): {type(result)}. Expected dict.")
+            return {"error": "Unexpected data format from interface tool for single interface."}
+    else: # All interfaces requested
+        if isinstance(result, list): # Expected result for all
+            return {"interfaces": result}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for all interfaces fetch: {type(result)}. Expected list.")
+            return {"error": "Unexpected data format from interface tool for all interfaces."}
 
 @app.tool()
 async def create_fortigate_network_interface(ctx: Context, interface_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -221,27 +222,30 @@ async def create_fortigate_network_interface(ctx: Context, interface_config: Dic
         return {"error": f"An unexpected server error occurred: {str(e)}"}
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_fortigate_static_routes(ctx: Context, route_seq_num: Optional[int] = None) -> Dict[str, Any]:
     """
     Retrieves all static routes or a specific static route by its sequence number (seq-num) from FortiGate.
     If 'route_seq_num' is omitted, all static routes are returned.
     """
-    logger.info(f"MCP Tool: get_fortigate_static_routes called for route_seq_num: {route_seq_num}")
-    if not fgt_client_global:
-        return {"error": "FortiGate client is not available."}
-    try:
-        result = get_static_routes(fgt_client_global, route_seq_num=route_seq_num)
-        if isinstance(result, dict) and "error" in result:
-            return result
-        elif isinstance(result, list):
-            return {"static_routes": result}
-        elif isinstance(result, dict): 
+    logger.info(f"Executing get_fortigate_static_routes for route_seq_num: {route_seq_num if route_seq_num is not None else 'all routes'}.")
+    result = get_static_routes(fgt_client_global, route_seq_num=route_seq_num)
+
+    if isinstance(result, dict) and "error" in result:
+        return result
+    
+    if route_seq_num is not None: # Single route requested
+        if isinstance(result, dict): # Expected result for single
             return {"static_route": result}
-        else:
-            return {"error": "Unexpected data format from static route tool."}
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_fortigate_static_routes: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for single static route fetch ('{route_seq_num}'): {type(result)}. Expected dict.")
+            return {"error": "Unexpected data format from static route tool for single route."}
+    else: # All routes requested
+        if isinstance(result, list): # Expected result for all
+            return {"static_routes": result}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for all static routes fetch: {type(result)}. Expected list.")
+            return {"error": "Unexpected data format from static route tool for all routes."}
 
 @app.tool()
 async def create_fortigate_static_route(ctx: Context, route_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -295,27 +299,30 @@ async def create_fortigate_address_object(ctx: Context, object_config: Dict[str,
         return {"error": f"An unexpected server error occurred: {str(e)}"}
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_fortigate_address_object(ctx: Context, object_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Retrieves details for all address objects or a specific address object by name from FortiGate.
     If 'object_name' is omitted, all address objects are returned.
     """
-    logger.info(f"MCP Tool: get_fortigate_address_object called for object_name: {object_name}")
-    if not fgt_client_global:
-        return {"error": "FortiGate client is not available."}
-    try:
-        result = get_address_object(fgt_client_global, object_name=object_name)
-        if isinstance(result, dict) and "error" in result:
-            return result
-        elif isinstance(result, list): 
-            return {"address_objects": result}
-        elif isinstance(result, dict): 
+    logger.info(f"Executing get_fortigate_address_object for object_name: {object_name if object_name else 'all objects'}.")
+    result = get_address_object(fgt_client_global, object_name=object_name)
+
+    if isinstance(result, dict) and "error" in result:
+        return result
+    
+    if object_name is not None: # Single object requested
+        if isinstance(result, dict): # Expected result for single
             return {"address_object": result}
-        else:
-            return {"error": "Unexpected data format from address object tool."}
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_fortigate_address_object: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for single address object fetch ('{object_name}'): {type(result)}. Expected dict.")
+            return {"error": "Unexpected data format from address object tool for single object."}
+    else: # All objects requested
+        if isinstance(result, list): # Expected result for all
+            return {"address_objects": result}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for all address objects fetch: {type(result)}. Expected list.")
+            return {"error": "Unexpected data format from address object tool for all objects."}
 
 @app.tool()
 async def create_fortigate_service_object(ctx: Context, service_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -341,28 +348,31 @@ async def create_fortigate_service_object(ctx: Context, service_config: Dict[str
         return {"error": f"An unexpected server error occurred: {str(e)}"}
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_fortigate_service_object(ctx: Context, service_name: Optional[str] = None, service_type: str = "custom") -> Dict[str, Any]:
     """
     Retrieves details for custom firewall service objects or a specific one by name from FortiGate.
     If 'service_name' is omitted, all services of 'service_type' (default 'custom') are returned.
     'service_type' can be 'custom' or 'predefined' (predefined listing may be limited).
     """
-    logger.info(f"MCP Tool: get_fortigate_service_object called for service_name: {service_name}, type: {service_type}")
-    if not fgt_client_global:
-        return {"error": "FortiGate client is not available."}
-    try:
-        result = get_service_object(fgt_client_global, service_name=service_name, service_type=service_type)
-        if isinstance(result, dict) and "error" in result:
-            return result
-        elif isinstance(result, list): 
-            return {"service_objects": result}
-        elif isinstance(result, dict): 
+    logger.info(f"Executing get_fortigate_service_object for service_name: {service_name if service_name else f'all {service_type} services'}.")
+    result = get_service_object(fgt_client_global, service_name=service_name, service_type=service_type)
+
+    if isinstance(result, dict) and "error" in result:
+        return result
+        
+    if service_name is not None: # Single service object requested
+        if isinstance(result, dict): # Expected result for single
             return {"service_object": result}
-        else:
-            return {"error": "Unexpected data format from service object tool."}
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_fortigate_service_object: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for single service object fetch ('{service_name}', type '{service_type}'): {type(result)}. Expected dict.")
+            return {"error": "Unexpected data format from service object tool for single object."}
+    else: # All service objects of a type requested
+        if isinstance(result, list): # Expected result for all
+            return {"service_objects": result}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for all service objects fetch (type '{service_type}'): {type(result)}. Expected list.")
+            return {"error": "Unexpected data format from service object tool for all objects."}
 
 @app.tool()
 async def create_fortigate_service_group(ctx: Context, group_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -394,27 +404,30 @@ async def create_fortigate_service_group(ctx: Context, group_config: Dict[str, A
         return {"error": f"An unexpected server error occurred: {str(e)}"}
 
 @app.tool()
+@mcp_tool_wrapper
 async def get_fortigate_service_group(ctx: Context, group_name: Optional[str] = None) -> Dict[str, Any]:
     """
     Retrieves details for all firewall service groups or a specific group by name from FortiGate.
     If 'group_name' is omitted, all service groups are returned.
     """
-    logger.info(f"MCP Tool: get_fortigate_service_group called for group_name: {group_name}")
-    if not fgt_client_global:
-        return {"error": "FortiGate client is not available."}
-    try:
-        result = get_service_group(fgt_client_global, group_name=group_name)
-        if isinstance(result, dict) and "error" in result: # Error from the tool
-            return result
-        elif isinstance(result, list): # Multiple groups
+    logger.info(f"Executing get_fortigate_service_group for group_name: {group_name if group_name else 'all groups'}.")
+    result = get_service_group(fgt_client_global, group_name=group_name)
+
+    if isinstance(result, dict) and "error" in result:
+        return result
+        
+    if group_name is not None: # Single group requested
+        if isinstance(result, dict): # Expected result for single
+            return {"service_group": result}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for single service group fetch ('{group_name}'): {type(result)}. Expected dict.")
+            return {"error": "Unexpected data format from service group tool for single group."}
+    else: # All groups requested
+        if isinstance(result, list): # Expected result for all
             return {"service_groups": result}
-        elif isinstance(result, dict): # Single group or could be an empty result if not found by name
-            return {"service_group": result} 
-        else:
-            return {"error": "Unexpected data format from service group tool."}
-    except Exception as e:
-        logger.error(f"Unexpected error in MCP tool get_fortigate_service_group: {e}", exc_info=True)
-        return {"error": f"An unexpected server error occurred: {str(e)}"}
+        else: # Should ideally not happen
+            logger.error(f"Unexpected result type for all service groups fetch: {type(result)}. Expected list.")
+            return {"error": "Unexpected data format from service group tool for all groups."}
 
 
 # To run this server:

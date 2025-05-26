@@ -2,18 +2,7 @@
 
 import logging
 from .fortigate_client import FortiGateClientError, FORTIGATE_VDOM
-
-def _parse_api_error_details(response_obj_or_text):
-    """Helper to extract error details from various response types."""
-    if hasattr(response_obj_or_text, 'text'): # requests.Response like
-        try:
-            data = response_obj_or_text.json()
-            return data.get("cli_error", data.get("message", str(data)))
-        except ValueError:
-            return response_obj_or_text.text
-    elif isinstance(response_obj_or_text, dict):
-        return response_obj_or_text.get("cli_error", response_obj_or_text.get("message", str(response_obj_or_text)))
-    return str(response_obj_or_text)
+from .utils import _parse_api_error_details, handle_api_response
 
 logger = logging.getLogger(__name__)
 
@@ -59,60 +48,29 @@ def create_service_object(fgt_client, service_config: dict):
         # Path for custom service creation: cmdb.firewall_service.custom
         api_collection_obj = _resolve_fgt_api_path(fgt_client, ["cmdb", "firewall_service", "custom"], f"CREATE service object '{service_name}'")
         api_response = api_collection_obj.create(data=service_config)
-        
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        text_content_for_check = ""
+        response_dict = handle_api_response(api_response, f"service object creation for '{service_name}'", FORTIGATE_VDOM, logger)
 
-        if hasattr(api_response, 'text'):
-            text_content_for_check = api_response.text
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-                if isinstance(response_data, dict):
-                    text_content_for_check = str(response_data)
-            except ValueError:
-                response_data = text_content_for_check if text_content_for_check else str(api_response)
-
-        logger.debug(f"API response for service '{service_name}': HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
-
-        if status_code and 200 <= status_code < 300:
-            if isinstance(response_data, dict) and response_data.get("status") == "error":
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error for service '{service_name}' (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for service '{service_name}'", "details": response_data}
-            logger.info(f"Successfully sent create request for service object '{service_name}'. HTTP Status: {status_code}.")
-            return {"status": "success", "message": f"Service object '{service_name}' creation request sent.", "details": response_data}
-        
-        elif status_code == 500 and ("already exist" in text_content_for_check.lower() or "duplicate entry" in text_content_for_check.lower() or "-5: Object already_exists" in text_content_for_check.lower()):
-            logger.warning(f"Service object '{service_name}' might already exist. FortiGate returned HTTP 500. Details: {response_data}")
-            return {"status": "warning", "message": f"Service object '{service_name}' may already exist (HTTP 500).", "details": response_data}
-        
-        elif status_code:
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error (HTTP {status_code}) for service '{service_name}': {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code}) for '{service_name}'", "details": response_data}
-        
-        elif isinstance(api_response, dict): # Fallback for direct dict responses
-            if api_response.get("status") == "success":
-                 logger.info(f"Service object '{service_name}' creation successful (dict response).")
-                 return {"status": "success", "message": f"Service object '{service_name}' created successfully.", "details": api_response}
-            else: # Includes cases like "status": "error" or http_status being non-200 in the dict
-                 error_detail = _parse_api_error_details(api_response)
-                 if "already exist" in error_detail.lower() or "duplicate entry" in error_detail.lower() or "-5: Object already_exists" in error_detail:
-                     logger.warning(f"Service object '{service_name}' might already exist (parsed dict). Details: {api_response}")
-                     return {"status": "warning", "message": f"Service object '{service_name}' might already exist (parsed dict).", "details": api_response}
-                 logger.error(f"Service object '{service_name}' creation failed (dict response): {error_detail}")
-                 return {"error": f"Service object creation failed for '{service_name}' (dict response)", "details": api_response}
-        else:
-            logger.error(f"Service object creation for '{service_name}' returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library for service creation.", "details": str(api_response)}
+        if response_dict.get("error"):
+            details = response_dict.get("details", {})
+            http_status = response_dict.get("http_status")
+            
+            error_text_check = str(details).lower()
+            # Check for HTTP 500 or specific FortiOS error codes like -5 for "already exists"
+            if (http_status == 500 or (isinstance(details, dict) and details.get("error") == -5)) and \
+               ("already exist" in error_text_check or \
+                "duplicate entry" in error_text_check or \
+                "already_exists" in error_text_check or \
+                (isinstance(details, dict) and details.get("cli_error", "").startswith("Object already exists"))):
+                logger.warning(f"Service object '{service_name}' might already exist. API indicated an error but it's treated as a warning. Original error details: {details}")
+                return {"status": "warning", "message": f"Service object '{service_name}' might already exist.", "details": details}
+        return response_dict
 
     except AttributeError as ae: # From _resolve_fgt_api_path
         return {"error": str(ae)}
     except Exception as e:
         logger.error(f"API exception creating service object '{service_name}': {e}", exc_info=True)
-        return {"error": f"An API exception occurred for service '{service_name}'.", "details": str(e)}
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
+        return {"error": f"An API exception occurred for service '{service_name}'.", "details": error_details_str}
 
 
 def get_service_object(fgt_client, service_name: str = None, service_type: str = "custom"):
@@ -185,60 +143,28 @@ def create_service_group(fgt_client, group_config: dict):
         # Path for service group creation: cmdb.firewall_service.group
         api_collection_obj = _resolve_fgt_api_path(fgt_client, ["cmdb", "firewall_service", "group"], f"CREATE service group '{group_name}'")
         api_response = api_collection_obj.create(data=group_config)
+        response_dict = handle_api_response(api_response, f"service group creation for '{group_name}'", FORTIGATE_VDOM, logger)
 
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        text_content_for_check = ""
+        if response_dict.get("error"):
+            details = response_dict.get("details", {})
+            http_status = response_dict.get("http_status")
 
-        if hasattr(api_response, 'text'):
-            text_content_for_check = api_response.text
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-                if isinstance(response_data, dict):
-                    text_content_for_check = str(response_data)
-            except ValueError:
-                response_data = text_content_for_check if text_content_for_check else str(api_response)
-
-        logger.debug(f"API response for service group '{group_name}': HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
-
-        if status_code and 200 <= status_code < 300:
-            if isinstance(response_data, dict) and response_data.get("status") == "error":
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error for service group '{group_name}' (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for service group '{group_name}'", "details": response_data}
-            logger.info(f"Successfully sent create request for service group '{group_name}'. HTTP Status: {status_code}.")
-            return {"status": "success", "message": f"Service group '{group_name}' creation request sent.", "details": response_data}
-
-        elif status_code == 500 and ("already exist" in text_content_for_check.lower() or "duplicate entry" in text_content_for_check.lower() or "-5: Object already_exists" in text_content_for_check.lower()):
-            logger.warning(f"Service group '{group_name}' might already exist. FortiGate returned HTTP 500. Details: {response_data}")
-            return {"status": "warning", "message": f"Service group '{group_name}' may already exist (HTTP 500).", "details": response_data}
-
-        elif status_code:
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error (HTTP {status_code}) for service group '{group_name}': {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code}) for '{group_name}'", "details": response_data}
-
-        elif isinstance(api_response, dict): # Fallback for direct dict responses
-            if api_response.get("status") == "success":
-                 logger.info(f"Service group '{group_name}' creation successful (dict response).")
-                 return {"status": "success", "message": f"Service group '{group_name}' created successfully.", "details": api_response}
-            else:
-                 error_detail = _parse_api_error_details(api_response)
-                 if "already exist" in error_detail.lower() or "duplicate entry" in error_detail.lower() or "-5: Object already_exists" in error_detail:
-                     logger.warning(f"Service group '{group_name}' might already exist (parsed dict). Details: {api_response}")
-                     return {"status": "warning", "message": f"Service group '{group_name}' might already exist (parsed dict).", "details": api_response}
-                 logger.error(f"Service group '{group_name}' creation failed (dict response): {error_detail}")
-                 return {"error": f"Service group creation failed for '{group_name}' (dict response)", "details": api_response}
-        else:
-            logger.error(f"Service group creation for '{group_name}' returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library for service group creation.", "details": str(api_response)}
-
+            error_text_check = str(details).lower()
+            if (http_status == 500 or (isinstance(details, dict) and details.get("error") == -5)) and \
+               ("already exist" in error_text_check or \
+                "duplicate entry" in error_text_check or \
+                "already_exists" in error_text_check or \
+                (isinstance(details, dict) and details.get("cli_error", "").startswith("Object already exists"))):
+                logger.warning(f"Service group '{group_name}' might already exist. API indicated an error but it's treated as a warning. Original error details: {details}")
+                return {"status": "warning", "message": f"Service group '{group_name}' might already exist.", "details": details}
+        return response_dict
+        
     except AttributeError as ae: # From _resolve_fgt_api_path
         return {"error": str(ae)}
     except Exception as e:
         logger.error(f"API exception creating service group '{group_name}': {e}", exc_info=True)
-        return {"error": f"An API exception occurred for service group '{group_name}'.", "details": str(e)}
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
+        return {"error": f"An API exception occurred for service group '{group_name}'.", "details": error_details_str}
 
 def get_service_group(fgt_client, group_name: str = None):
     """

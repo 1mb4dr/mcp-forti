@@ -2,21 +2,10 @@
 
 import logging
 from .fortigate_client import FortiGateClientError, FORTIGATE_VDOM
+from .utils import _parse_api_error_details, handle_api_response
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-def _parse_api_error_details(response_obj_or_text):
-    """Helper to extract error details from various response types."""
-    if hasattr(response_obj_or_text, 'text'): # requests.Response like
-        try:
-            data = response_obj_or_text.json()
-            return data.get("cli_error", data.get("error_message", str(data)))
-        except ValueError:
-            return response_obj_or_text.text
-    elif isinstance(response_obj_or_text, dict):
-        return response_obj_or_text.get("cli_error", response_obj_or_text.get("error_message", str(response_obj_or_text)))
-    return str(response_obj_or_text)
 
 def get_policy_details(fgt_client, policy_id: int):
     """
@@ -92,25 +81,13 @@ def reorder_policy(fgt_client, policy_id_to_move: int, target_policy_id: int, mo
     payload = {"action": "move", move_action: target_policy_id}
     
     try:
-        response = fgt_client.cmdb.firewall.policy.set(mkey=policy_id_to_move, data=payload) # 'set' is typically used for PUT
-        logger.info(f"Policy move request for ID {policy_id_to_move} submitted. Response: {response}")
-
-        # Fortigate-api often returns the response directly or raises an exception.
-        # If no exception, assume processed. Response content varies.
-        if isinstance(response, dict):
-            if response.get("status") == "success":
-                 logger.info(f"Successfully moved policy ID {policy_id_to_move} {move_action} policy ID {target_policy_id}.")
-                 return {"status": "success", "message": f"Policy {policy_id_to_move} moved successfully.", "details": response}
-            elif response.get("status") == "error":
-                error_detail = _parse_api_error_details(response)
-                logger.error(f"FortiGate API error moving policy {policy_id_to_move}: {error_detail}")
-                return {"error": f"FortiGate API error during policy move: {error_detail}", "details": response}
-        
-        # If no detailed success/error in dict, or not a dict, assume processed if no exception.
-        return {"status": "processed", "message": f"Policy {policy_id_to_move} move action processed. Verify order. Response: {response}"}
+        api_response = fgt_client.cmdb.firewall.policy.set(mkey=policy_id_to_move, data=payload)
+        action_desc = f"policy reorder for ID {policy_id_to_move} to be {move_action} policy ID {target_policy_id}"
+        return handle_api_response(api_response, action_desc, FORTIGATE_VDOM, logger)
     except Exception as e:
         logger.error(f"Error moving policy {policy_id_to_move}: {e}", exc_info=True)
-        return {"error": f"An unexpected error occurred during policy move for {policy_id_to_move}: {str(e)}"}
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
+        return {"error": f"An unexpected error occurred during policy move for {policy_id_to_move}: {error_details_str}"}
 
 def create_policy(fgt_client, policy_config: dict):
     """
@@ -138,49 +115,35 @@ def create_policy(fgt_client, policy_config: dict):
                     return {"error": msg}
     try:
         api_response = fgt_client.cmdb.firewall.policy.create(data=policy_config)
-        
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-            except ValueError: # Not JSON
-                response_data = getattr(api_response, 'text', str(api_response))
-        
-        logger.debug(f"API response for policy '{policy_name}': HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
+        # Special handling for mkey in policy creation success
+        response_dict = handle_api_response(api_response, f"policy creation for '{policy_name}'", FORTIGATE_VDOM, logger)
+        if response_dict.get("status") == "success":
+            # Attempt to extract mkey (policy ID) from details if present
+            details = response_dict.get("details", {})
+            mkey = details.get("mkey") if isinstance(details, dict) else None
+            if mkey:
+                response_dict["policy_id"] = mkey
+            else: # If mkey not directly in details, it might be under results (less common for create)
+                results = details.get("results") if isinstance(details, dict) else None
+                if isinstance(results, list) and results:
+                    mkey = results[0].get("mkey")
+                elif isinstance(results, dict): # If results is a single dict
+                    mkey = results.get("mkey")
 
-        if status_code and 200 <= status_code < 300:
-            if isinstance(response_data, dict) and response_data.get("status") == "error":
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error for policy '{policy_name}' (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for policy '{policy_name}'", "details": response_data}
+                if mkey:
+                     response_dict["policy_id"] = mkey
+                else: # Fallback if mkey is not found, use the provided name as a potential identifier
+                    response_dict["policy_id"] = policy_name
+                    logger.warning(f"Could not determine 'mkey' (policy ID) from API response for policy '{policy_name}'. Using provided name as fallback ID.")
             
-            mkey = response_data.get("mkey", policy_name) if isinstance(response_data, dict) else policy_name
-            logger.info(f"Successfully created policy (HTTP {status_code}). Policy ID/Name: {mkey}.")
-            return {"status": "success", "message": "Policy created successfully.", "policy_id": mkey, "details": response_data}
-        elif status_code: # Error HTTP status code
-            error_detail = _parse_api_error_details(response_data)
-            logger.error(f"FortiGate API error (HTTP {status_code}) for policy '{policy_name}': {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code})", "details": response_data}
-        elif isinstance(api_response, dict): # Fallback for direct dict responses if no status_code
-            if api_response.get("status") == "success": # Check for fortigate-api's own success markers
-                 mkey = api_response.get("mkey", policy_name)
-                 logger.info(f"Policy '{policy_name}' creation successful (dict response). Policy ID/Name: {mkey}")
-                 return {"status": "success", "message": "Policy created successfully.", "policy_id": mkey, "details": api_response}
-            else:
-                 error_detail = _parse_api_error_details(api_response)
-                 logger.error(f"Policy '{policy_name}' creation failed (dict response): {error_detail}")
-                 return {"error": f"Policy creation failed for '{policy_name}' (dict response)", "details": api_response}
-        else:
-            logger.error(f"Policy creation for '{policy_name}' returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library.", "details": str(api_response)}
+            # Ensure 'message' reflects policy creation specifically
+            response_dict["message"] = f"Policy '{response_dict.get('policy_id', policy_name)}' created successfully."
 
+        return response_dict
     except Exception as e:
         logger.error(f"API exception creating policy '{policy_name}': {e}", exc_info=True)
-        error_details = str(e)
-        if hasattr(e, 'response'): # requests.exceptions.HTTPError often has a response attribute
-            error_details = _parse_api_error_details(e.response)
-        return {"error": f"API exception during policy '{policy_name}' creation.", "details": error_details}
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
+        return {"error": f"API exception during policy '{policy_name}' creation.", "details": error_details_str}
 
 def update_policy(fgt_client, policy_id: int, policy_config: dict):
     """
@@ -197,59 +160,16 @@ def update_policy(fgt_client, policy_id: int, policy_config: dict):
     try:
         # The fortigate-api library uses 'set' for updates (HTTP PUT) on CMDB items.
         api_response = fgt_client.cmdb.firewall.policy.set(mkey=policy_id, data=policy_config)
-        
-        status_code = getattr(api_response, 'status_code', None)
-        response_data = api_response
-        if hasattr(api_response, 'json'):
-            try:
-                response_data = api_response.json()
-            except ValueError: # If response is not JSON
-                response_data = getattr(api_response, 'text', str(api_response))
-        
-        logger.debug(f"API response for policy update ID {policy_id}: HTTP {status_code if status_code else 'N/A'}, Data: {response_data}")
-
-        if status_code and 200 <= status_code < 300:
-            if isinstance(response_data, dict) and response_data.get("status") == "error":
-                error_detail = _parse_api_error_details(response_data)
-                logger.error(f"FortiGate API error on update for policy ID {policy_id} (HTTP {status_code}): {error_detail}")
-                return {"error": f"FortiGate API error for policy ID {policy_id} update", "details": response_data}
-            
-            logger.info(f"Successfully updated policy ID {policy_id} (HTTP {status_code}).")
-            return {"status": "success", "message": f"Policy ID {policy_id} updated successfully.", "details": response_data}
-        elif status_code: # Error HTTP status code
-            error_detail = _parse_api_error_details(response_data)
-            # Specific check for "not found" type errors from HTTP status
-            if status_code == 404 or "not found" in error_detail.lower() or "entry not found" in error_detail.lower():
-                logger.warning(f"Policy ID {policy_id} not found for update (HTTP {status_code}). Error: {error_detail}")
-                return {"error": f"Policy ID {policy_id} not found (API error).", "details": error_detail}
-            logger.error(f"FortiGate API error (HTTP {status_code}) updating policy ID {policy_id}: {error_detail}")
-            return {"error": f"FortiGate API error (HTTP {status_code}) for policy ID {policy_id} update", "details": response_data}
-        elif isinstance(api_response, dict): # Fallback for direct dict responses
-            if api_response.get("status") == "success":
-                 logger.info(f"Policy ID {policy_id} update successful (dict response).")
-                 return {"status": "success", "message": f"Policy ID {policy_id} updated successfully.", "details": api_response}
-            else:
-                 error_detail = _parse_api_error_details(api_response)
-                 if "entry not found" in error_detail.lower() or "-404" in error_detail: # Check for error codes if present
-                    logger.warning(f"Policy ID {policy_id} not found for update (dict response). Error: {error_detail}")
-                    return {"error": f"Policy ID {policy_id} not found (API error).", "details": error_detail}
-                 logger.error(f"Policy ID {policy_id} update failed (dict response): {error_detail}")
-                 return {"error": f"Policy update failed for ID {policy_id} (dict response)", "details": api_response}
-        else:
-            logger.error(f"Policy update for ID {policy_id} returned an unexpected response type: {type(api_response)}, {api_response}")
-            return {"error": "Unexpected response type from API library during update.", "details": str(api_response)}
-
+        return handle_api_response(api_response, f"policy update for ID {policy_id}", FORTIGATE_VDOM, logger)
     except Exception as e:
         logger.error(f"API exception updating policy ID {policy_id}: {e}", exc_info=True)
-        error_details = str(e)
-        if hasattr(e, 'response'):
-            error_details = _parse_api_error_details(e.response)
+        error_details_str = _parse_api_error_details(e.response) if hasattr(e, 'response') else str(e)
         
         # Specific check for "entry not found" or similar for updates on non-existent items
-        if "entry not found" in error_details.lower() or "404" in error_details or "not found" in error_details.lower():
-             logger.warning(f"Attempted to update non-existent policy ID {policy_id}. Error: {error_details}")
-             return {"error": f"Policy ID {policy_id} not found for update.", "details": error_details}
-        return {"error": f"API exception during policy ID {policy_id} update.", "details": error_details}
+        if "entry not found" in error_details_str.lower() or "404" in error_details_str or "not found" in error_details_str.lower():
+             logger.warning(f"Attempted to update non-existent policy ID {policy_id}. Error: {error_details_str}")
+             return {"error": f"Policy ID {policy_id} not found for update.", "details": error_details_str}
+        return {"error": f"API exception during policy ID {policy_id} update.", "details": error_details_str}
 
 if __name__ == '__main__':
     # Import get_fortigate_client locally for testing this module
@@ -318,10 +238,14 @@ if __name__ == '__main__':
 
             if isinstance(initial_policy_details_response, dict) and "error" in initial_policy_details_response:
                 logger.error(f"Cannot proceed with update test for policy ID {policy_id_to_get}: Error fetching initial details: {initial_policy_details_response['error']}")
-            elif not isinstance(initial_policy_details_response, dict) or "results" not in initial_policy_details_response or not initial_policy_details_response["results"]:
-                logger.error(f"Cannot proceed with update test for policy ID {policy_id_to_get}: No results found or unexpected format for initial details: {initial_policy_details_response}")
+            # get_policy_details for a specific policy should return the policy dict directly or an error dict
+            elif not isinstance(initial_policy_details_response, dict) or initial_policy_details_response.get('policyid') != policy_id_to_get: # Check for policyid
+                logger.error(f"Cannot proceed with update test for policy ID {policy_id_to_get}: Expected a dict with policy details but got: {initial_policy_details_response}")
+                initial_policy_details = None # Add this line
             else:
-                initial_policy_details = initial_policy_details_response["results"][0] # Assuming result is a list with one item
+                initial_policy_details = initial_policy_details_response # Assign directly
+            
+            if initial_policy_details: # Check if initial_policy_details is not None
                 original_comments = initial_policy_details.get("comments", "")
                 original_status = initial_policy_details.get("status")
                 logger.info(f"Original comments for policy ID {policy_id_to_get}: '{original_comments}'")
@@ -342,9 +266,8 @@ if __name__ == '__main__':
                     else:
                         logger.info(f"Policy ID {policy_id_to_get} update API call response: {update_response}")
                         logger.info(f"Verifying update for policy ID {policy_id_to_get}...")
-                        updated_details_response = get_policy_details(client, policy_id=policy_id_to_get)
-                        if isinstance(updated_details_response, dict) and "results" in updated_details_response and updated_details_response["results"]:
-                            updated_details = updated_details_response["results"][0]
+                        updated_details = get_policy_details(client, policy_id=policy_id_to_get)
+                        if isinstance(updated_details, dict) and updated_details.get('policyid') == policy_id_to_get:
                             current_comments = updated_details.get("comments", "")
                             current_status = updated_details.get("status")
                             if current_comments == update_policy_config["comments"] and current_status == update_policy_config["status"]:
@@ -352,7 +275,7 @@ if __name__ == '__main__':
                             else:
                                 logger.error(f"FAILURE: Policy ID {policy_id_to_get} verification failed. Expected: Comments='{update_policy_config['comments']}', Status='{update_policy_config['status']}'. Got: Comments='{current_comments}', Status='{current_status}'.")
                         else:
-                            logger.error(f"Could not verify update for policy ID {policy_id_to_get}'. Error fetching details post-update: {updated_details_response}")
+                            logger.error(f"Could not verify update for policy ID {policy_id_to_get}'. Error fetching details post-update: {updated_details}")
 
                         # Revert Change
                         revert_policy_config = {"comments": original_comments, "status": original_status}
@@ -364,9 +287,8 @@ if __name__ == '__main__':
                         else:
                             logger.info(f"Policy ID {policy_id_to_get} revert API call response: {revert_response}")
                             logger.info(f"Verifying revert for policy ID {policy_id_to_get}'...")
-                            reverted_details_response = get_policy_details(client, policy_id=policy_id_to_get)
-                            if isinstance(reverted_details_response, dict) and "results" in reverted_details_response and reverted_details_response["results"]:
-                                reverted_details = reverted_details_response["results"][0]
+                            reverted_details = get_policy_details(client, policy_id=policy_id_to_get)
+                            if isinstance(reverted_details, dict) and reverted_details.get('policyid') == policy_id_to_get:
                                 final_comments = reverted_details.get("comments", "")
                                 final_status = reverted_details.get("status")
                                 if final_comments == original_comments and final_status == original_status:
@@ -374,7 +296,7 @@ if __name__ == '__main__':
                                 else:
                                     logger.error(f"FAILURE: Policy ID {policy_id_to_get} revert verification failed. Expected: Comments='{original_comments}', Status='{original_status}'. Got: Comments='{final_comments}', Status='{final_status}'.")
                             else:
-                                logger.error(f"Could not verify revert for policy ID {policy_id_to_get}'. Error fetching details post-revert: {reverted_details_response}")
+                                logger.error(f"Could not verify revert for policy ID {policy_id_to_get}'. Error fetching details post-revert: {reverted_details}")
         else:
             logger.error("Could not get FortiGate client for testing policies.")
     except FortiGateClientError as e:
